@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "warmpy"
+dynamic = ["version"]
+description = "Keeps Python CLIs warm by holding their slow imports loaded in a background process that starts and stops itself"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{name = "Jeremy Howard", email = "github@jhoward.fastmail.fm"}]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+]
+
+dependencies = ["fastcore"]
+
+[project.optional-dependencies]
+dev = [
+  "fastship",
+  "build",
+  "twine",
+]
+
+[project.urls]
+Homepage = "https://github.com/AnswerDotAI/warmpy"
+Repository = "https://github.com/AnswerDotAI/warmpy"
+
+[tool.setuptools.dynamic]
+version = { attr = "warmpy.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["warmpy"]
