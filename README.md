@@ -2,25 +2,29 @@
 
 Importing a big library takes seconds. Python pays that cost once per process, and a CLI starts a new process for every command, so a CLI pays it on every command. warmpy pays it once. The wrapped function runs in a background process that has already done its imports. The command you type becomes a small program that starts fast, sends its arguments to the background process, and shows the output.
 
-PersistentPerl solved this problem for Perl CLIs twenty years ago, under the name `pperl`. warmpy is the same idea for Python: a background process that starts on first use, serves later calls, and exits when idle.
+A warmpy-decorated function creates a background process that starts on first use, serves later calls, and exits when idle. PersistentPerl used this trick for Perl CLIs twenty years ago, under the name `pperl`. warmpy is the same idea for Python
 
 ## Install
 
-    pip install warmpy
+```
+pip install warmpy
+```
 
 warmpy needs unix sockets that can pass file descriptors, which macOS and Linux provide. Where they are absent, every call runs in the calling process, slowly, with the same results.
 
 ## Use
 
-    from warmpy import warm_parse
+```python
+from warmpy import warm_parse
 
-    @warm_parse
-    def main(
-        path:str=None,  # File to process; stdin if omitted
-    ):
-        "Process a file"
-        from .core import process   # the slow import goes inside the body
-        ...
+@warm_parse
+def main(
+    path:str=None,  # File to process; stdin if omitted
+):
+    "Process a file"
+    from .core import process   # the slow import goes inside the body
+    ...
+```
 
 `warm_parse` takes the place of `fastcore.script.call_parse`. The function signature and its docments define the command line. Parsing happens in the calling process, so `--help` and argument errors never touch the background process. `warm_parse(idle=1800, workers=4)` sets how many seconds of disuse end the background process and how many worker processes may exist at once.
 
