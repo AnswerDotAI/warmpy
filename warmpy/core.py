@@ -1,12 +1,10 @@
 "Run CLI functions in a background process that keeps slow imports loaded."
 import asyncio, hashlib, inspect, json, os, signal, socket, struct, subprocess, sys, threading, time, traceback
-from argparse import SUPPRESS
 from contextlib import suppress
 from functools import partial, wraps
 from importlib import import_module, metadata
 from pathlib import Path
-from fastcore.script import anno_parser, args_from_prog
-from fastcore.basics import merge
+from fastcore.script import parse_cli
 from fastcore.foundation import working_directory
 from fastcore.xtras import trace
 
@@ -71,15 +69,15 @@ def _await_server(path, tries=50):
         time.sleep(0.1)
     return None
 
-def _request(s, kw):
-    req = json.dumps(dict(op='call', kw=kw, cwd=os.getcwd(), env=dict(os.environ))).encode()
+def _request(s, args, kw):
+    req = json.dumps(dict(op='call', args=args, kw=kw, cwd=os.getcwd(), env=dict(os.environ))).encode()
     socket.send_fds(s, [struct.pack('!I', len(req))], [0, 1, 2])
     s.sendall(req)
     old = signal.signal(signal.SIGINT, lambda *a: s.sendall(b'\x03'))
     try: return json.loads(_recv_frame(s))['exit']
     finally: signal.signal(signal.SIGINT, old)
 
-def _warm_call(func, target, kw, idle, workers):
+def _warm_call(func, target, args, kw, idle, workers):
     try:
         path, tok = _sockpath(target), _token(target)
         for attempt in (1, 2):
@@ -93,13 +91,13 @@ def _warm_call(func, target, kw, idle, workers):
                     _send_frame(s, json.dumps(dict(op='stop')).encode())
                     with suppress(Exception): _recv_frame(s)
                     continue
-                return _request(s, kw)
+                return _request(s, args, kw)
     except Exception: pass
-    return _cold_call(func, kw)  # any warmpy failure: run it here, slowly
+    return _cold_call(func, args, kw)  # any warmpy failure: run it here, slowly
 
-def _cold_call(func, kw):
+def _cold_call(func, args, kw):
     try:
-        res = func(**kw)
+        res = func(*args, **kw)
         if inspect.isawaitable(res): res = asyncio.run(res)
         return res
     except KeyboardInterrupt: return 130
@@ -151,7 +149,7 @@ def _handle(conn, func):
     threading.Thread(target=_watch, args=(conn, active), daemon=True).start()
     code = 0
     try:
-        res = func(**req['kw'])
+        res = func(*req['args'], **req['kw'])
         if inspect.isawaitable(res): res = asyncio.run(res)
         if isinstance(res, int): code = res
     except SystemExit as e: code = _exit_code(e)
@@ -192,13 +190,17 @@ class _Worker:
         self.proc = subprocess.Popen([sys.executable, '-m', 'warmpy', '--worker', target, str(wrk.fileno()), str(idle)],
             pass_fds=[wrk.fileno()], stdin=subprocess.DEVNULL)
         wrk.close()
-        self.busy = False
+        self.busy,self.conn = False,None
 
     def give(self, conn):
-        "Hand `conn` to the worker; it reads it when its import is done, so no readiness protocol is needed."
+        "Hand `conn` to the worker. It reads `conn` when its import is done. Keep this copy open until `done`. macOS breaks a connection that is closed while in transit."
         socket.send_fds(self.ctl, [b'C'], [conn.fileno()])
-        self.busy = True
-        conn.close()
+        self.busy,self.conn = True,conn
+
+    def done(self):
+        "Close the supervisor's copy of a connection the worker has finished with"
+        self.busy = False
+        if self.conn: self.conn.close()
 
 def supervise(target, path, idle, cap=4):
     "Own the socket, never import the app, and hand each connection to an idle worker, spawning up to `cap` of them."
@@ -217,6 +219,7 @@ def supervise(target, path, idle, cap=4):
     def drop(w):
         sel.unregister(w.ctl)
         w.ctl.close()
+        w.done()
         workers.remove(w)
 
     def dispatch(conn):
@@ -251,9 +254,9 @@ def supervise(target, path, idle, cap=4):
                     with suppress(OSError): b = w.ctl.recv(1)
                     if b == b'S':
                         stopping = True
-                        w.busy = False
+                        w.done()
                     elif b == b'D':
-                        w.busy = False
+                        w.done()
                         if pending: w.give(pending.pop(0))
                     else: drop(w)  # EOF: the worker timed out or died
             if stopping and not any(w.busy for w in workers) and not pending: break
@@ -264,22 +267,23 @@ def supervise(target, path, idle, cap=4):
 
 # --- decorator ---
 
-def warm_parse(func=None, *, idle=1800, workers=4):
+def _pop_flag(flag):
+    "Remove `flag` from `sys.argv`, returning whether it was there"
+    if flag not in sys.argv: return False
+    sys.argv.remove(flag)
+    return True
+
+def warm_parse(func=None, *, idle=1800, workers=4, pos=None):
     "Like `fastcore.script.call_parse`, but the function body runs in a warm background process."
-    if func is None: return partial(warm_parse, idle=idle, workers=workers)
+    if func is None: return partial(warm_parse, idle=idle, workers=workers, pos=pos)
     target = f'{func.__module__}:{func.__qualname__}'
     @wraps(func)
     def _f(*args, **kwargs):
         if args or kwargs: return func(*args, **kwargs)
-        p = anno_parser(func)
-        p.add_argument('--warmpy-stop', help=SUPPRESS, action='store_true')
-        p.add_argument('--warmpy-once', help=SUPPRESS, action='store_true')
-        pa = p.parse_args().__dict__
-        once = pa.pop('warmpy_once', False)
-        if pa.pop('warmpy_stop', False): return _stop_server(target)
-        xtra = pa.pop('xtra', None)
-        if xtra: pa = merge(pa, args_from_prog(func, xtra))
-        if pa.pop('pdb', False): return _cold_call(trace(func), pa)
-        if once or os.environ.get('WARMPY') == '0' or not hasattr(socket, 'send_fds'): return _cold_call(func, pa)
-        return _warm_call(func, target, pa, idle, workers)
+        once,stop = _pop_flag('--warmpy-once'),_pop_flag('--warmpy-stop')
+        if stop: return _stop_server(target)
+        pargs,pa,pdb = parse_cli(func, pos=pos)
+        if pdb: return _cold_call(trace(func), pargs, pa)
+        if once or os.environ.get('WARMPY') == '0' or not hasattr(socket, 'send_fds'): return _cold_call(func, pargs, pa)
+        return _warm_call(func, target, pargs, pa, idle, workers)
     return _f

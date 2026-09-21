@@ -184,3 +184,31 @@ def test_once(tmp_path):
     assert r.returncode==0, r.stderr
     assert r.stdout.startswith('solo pid=')
     assert not list((tmp_path/'run').iterdir())   # ran in-process: no socket, no server, no log
+
+
+VAR_APP = r'''
+import os
+from warmpy import warm_parse
+
+@warm_parse
+def main(
+    x:int,          # First value
+    *ys:int,        # More values
+    tot:bool=False, # Print the total?
+):
+    "warmpy variadic test app"
+    print(f'{x+sum(ys) if tot else x} pid={os.getpid()}')
+'''
+
+def test_varargs(tmp_path):
+    (tmp_path/'app.py').write_text(VAR_APP)
+    (tmp_path/'run').mkdir()
+    try:
+        r1 = run(tmp_path, '2', '3', '4', '--tot')
+        assert r1.returncode==0, r1.stderr
+        assert r1.stdout.startswith('9 pid=')                   # positional values reach the function
+        r2 = run(tmp_path, '2', '3', '4', '--tot')
+        assert pid_of(r2)==pid_of(r1)                           # through the warm worker, not a cold fallback
+        rc = run(tmp_path, '2', '3', '4', '--tot', '--warmpy-once')
+        assert rc.stdout.startswith('9 pid=') and pid_of(rc)!=pid_of(r1)   # and through the in-process call
+    finally: run(tmp_path, '--warmpy-stop')

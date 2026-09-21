@@ -26,7 +26,7 @@ def main(
     ...
 ```
 
-`warm_parse` takes the place of `fastcore.script.call_parse`. The function signature and its docments define the command line. Parsing happens in the calling process, so `--help` and argument errors never touch the background process. `warm_parse(idle=1800, workers=4)` sets how many seconds of disuse end the background process and how many worker processes may exist at once.
+`warm_parse` takes the place of `fastcore.script.call_parse`. The function signature and its docments define the command line. Parsing happens in the calling process, so `--help` and argument errors never touch the background process. `warm_parse(idle=1800, workers=4)` sets how many seconds of disuse end the background process and how many worker processes may exist at once. `pos` names parameters that stay positional even with defaults, as in `call_parse`.
 
 The module that holds the wrapped function must import fast. Heavy imports go inside the function body. A slow module makes every call slow, and warmpy cannot fix that.
 
